@@ -35,6 +35,7 @@ from vllm.model_executor.layers.fla.ops import (
 )
 from vllm.model_executor.layers.fla.ops import (
     fused_recurrent_gated_delta_rule,
+    fused_recurrent_gated_delta_rule_packed_fwd,
 )
 from vllm.model_executor.layers.fla.ops.chunk import l2norm_fwd
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
@@ -725,6 +726,29 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             )
         else:
             mixed_qkv_non_spec = None
+
+        is_spec_decode_only = (
+            spec_sequence_masks is not None
+            and attn_metadata.num_prefills == 0
+            and attn_metadata.num_decodes == 0
+        )
+        if is_spec_decode_only and mixed_qkv_spec is not None:
+            out_buf = core_attn_out[:num_actual_tokens].unsqueeze(0)
+            fused_recurrent_gated_delta_rule_packed_fwd(
+                mixed_qkv=mixed_qkv_spec,
+                a=a,
+                b=b,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                scale=self.head_k_dim**-0.5,
+                initial_state=ssm_state,
+                out=out_buf,
+                cu_seqlens=spec_query_start_loc[: attn_metadata.num_spec_decodes + 1],
+                ssm_state_indices=spec_state_indices_tensor,
+                num_accepted_tokens=num_accepted_tokens,
+                use_qk_l2norm_in_kernel=True,
+            )
+            return
 
         query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
         query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(
